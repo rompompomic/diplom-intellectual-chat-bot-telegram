@@ -1,0 +1,36 @@
+telegram:
+  allowed_user_ids: []
+  interface_language: ru
+
+openai:
+  model_primary: gpt-5-mini
+  model_secondary: gpt-5.4-mini
+  model_fallback: gpt-4.1-mini
+
+security:
+  allowed_dirs:
+    - "%USERPROFILE%\\Documents"
+    - "%USERPROFILE%\\Downloads"
+    - "%USERPROFILE%\\Desktop"
+    - "."
+    - "D:\\"
+    - "C:\\"
+    - "E:\\"
+  file_size_limit_mb: 25
+  max_files_per_operation: 100
+  powershell_timeout_sec: 20
+
+tools:
+  allowed_apps:
+    notepad: "C:\\Windows\\System32\\notepad.exe"
+  allowed_network_hosts:
+    - "google.com"
+    - "ya.ru"
+    - "cloudflare.com"
+
+runtime:
+  logs_dir: "./logs"
+  temp_dir: "./temp"
+  search_db_path: "./storage/search_index.db"
+  enable_startup_by_default: false
+  stt_model_size: "small"

@@ -1,0 +1,22 @@
+from __future__ import annotations
+
+import uuid
+from pathlib import Path
+
+from pydub import AudioSegment
+
+
+def build_temp_audio_path(temp_dir: Path, suffix: str) -> Path:
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    return (temp_dir / f"{uuid.uuid4().hex}{suffix}").resolve()
+
+
+def convert_to_wav(source_path: Path, target_path: Path) -> Path:
+    audio = AudioSegment.from_file(source_path)
+    audio.export(target_path, format="wav")
+    return target_path
+
+
+def safe_remove(path: Path) -> None:
+    if path.exists():
+        path.unlink(missing_ok=True)
