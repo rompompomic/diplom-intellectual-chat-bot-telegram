@@ -88,3 +88,12 @@ def test_find_in_downloads_and_send_uses_fuzzy_local_search(
     )
 
     assert result.attachment_path == str(target)
+
+
+def test_cancel_last_scheduled_task_button_returns_human_message(router: CommandsRouter) -> None:
+    scheduled = router.scheduler_tools.schedule_callable(lambda: None, minutes=60, job_prefix="test")
+
+    result = router.handle_text(chat_id=1, user_id=1, text="❌ Отмена последней запланированной задачи")
+
+    assert not result.message.strip().startswith("{")
+    assert scheduled["job_id"] in result.message

@@ -683,6 +683,17 @@ class CommandsRouter:
                 "Перед запуском .ps1 обязательно проверьте содержимое вручную."
             )
 
+        if action == "cancel_scheduled_task":
+            if payload.get("status") == "not_found":
+                return "Запланированных задач для отмены не найдено."
+            job_id = payload.get("job_id")
+            if job_id:
+                return f"Запланированная задача отменена. ID: {job_id}"
+            cancelled = payload.get("cancelled")
+            if cancelled is not None:
+                return f"Отменено запланированных задач: {cancelled}"
+            return "Запланированная задача отменена."
+
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     def _create_text_file(self, filename: str, content: str, extension: str) -> dict[str, Any]:
