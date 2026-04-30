@@ -67,6 +67,18 @@ def test_find_file_by_name_ignores_walk_errors(tmp_path: Path, monkeypatch: pyte
     assert found["files"] == [str(target)]
 
 
+def test_find_file_by_name_interprets_spoken_png_request(tmp_path: Path) -> None:
+    allowed = tmp_path / "Downloads"
+    allowed.mkdir()
+    target = allowed / "Рисунок 5.png"
+    target.write_text("x", encoding="utf-8")
+
+    tools = FileTools(allowed_dirs=[allowed], max_files_per_operation=100)
+    found = tools.find_file_by_name("рисунок 5PNG")
+
+    assert found["files"] == [str(target)]
+
+
 def test_file_tools_block_outside_path(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()

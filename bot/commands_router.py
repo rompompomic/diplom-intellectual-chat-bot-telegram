@@ -248,6 +248,10 @@ class CommandsRouter:
     def _try_parse_local_text(self, chat_id: int, user_id: int, text: str) -> RouteResult | None:
         lowered = text.lower()
 
+        find_and_send_result = self._try_handle_find_and_send_file(chat_id, user_id, text)
+        if find_and_send_result is not None:
+            return find_and_send_result
+
         find_match = re.match(r"^\s*найди\s+файл\s+(.+)$", lowered, re.IGNORECASE)
         if find_match:
             query = text.split(maxsplit=2)[-1]
@@ -325,6 +329,60 @@ class CommandsRouter:
             result = self._execute_action(chat_id, user_id, "list_scheduled_tasks", {}, confirmed=True)
             return self._route_result_from_tool("list_scheduled_tasks", result)
 
+        return None
+
+    def _try_handle_find_and_send_file(self, chat_id: int, user_id: int, text: str) -> RouteResult | None:
+        lowered = text.lower()
+        wants_find = "найди" in lowered or "найти" in lowered or "отыщи" in lowered
+        wants_send = any(word in lowered for word in ("отправ", "пришли", "скинь", "перешли"))
+        if not wants_find or not wants_send:
+            return None
+
+        query = self._extract_file_search_query(text)
+        if not query:
+            return None
+
+        scope_dirs = None
+        if "загруз" in lowered:
+            downloads = self._find_allowed_dir_by_name("downloads")
+            if downloads is not None:
+                scope_dirs = [str(downloads)]
+
+        find_result = self._execute_action(
+            chat_id,
+            user_id,
+            "find_file_by_name",
+            {"name": query, "scope_dirs": scope_dirs},
+            confirmed=True,
+        )
+        if find_result.get("status") != "ok":
+            return self._route_result_from_tool("find_file_by_name", find_result)
+
+        payload = find_result.get("result", {})
+        files = payload.get("files", [])
+        if not files:
+            location = "в загрузках" if scope_dirs else "в разрешённых папках"
+            return RouteResult(message=f"Не нашёл подходящий файл {location}: {query}")
+
+        path = str(files[0])
+        suffix = ""
+        if len(files) > 1:
+            suffix = f"\nНашёл ещё вариантов: {len(files) - 1}. Отправляю самый похожий."
+        return RouteResult(message=f"Нашёл файл: {path}{suffix}", attachment_path=path)
+
+    def _extract_file_search_query(self, text: str) -> str:
+        query = re.sub(r"^\s*(привет|здравствуй|добрый день)[,!\s]*", "", text, flags=re.IGNORECASE)
+        query = re.sub(r"\b(найди|найти|отыщи)\b", " ", query, count=1, flags=re.IGNORECASE)
+        query = re.sub(r"\b(в|из)\s+(папке\s+)?(загрузках|загрузки|downloads)\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(и\s+)?(отправь|отправить|пришли|скинь|перешли)\b.*$", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(мне|его|её|ее|сюда|файл|картинку|изображение)\b", " ", query, flags=re.IGNORECASE)
+        return " ".join(query.strip(" .,!?:;\"'").split())
+
+    def _find_allowed_dir_by_name(self, name: str) -> Path | None:
+        needle = name.lower()
+        for path in self.config.allowed_dirs:
+            if path.name.lower() == needle:
+                return path
         return None
 
     def _execute_action(

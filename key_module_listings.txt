@@ -1,0 +1,464 @@
+Листинги ключевых модулей проекта
+=================================
+
+Файл: app.py
+Назначение: точка входа приложения, загрузка конфигурации, настройка логирования и запуск Telegram-бота.
+
+Ключевые строки:
+
+from bot.telegram_handler import TelegramBotService
+from config import load_config
+from logging_setup import configure_logging
+
+def main() -> int:
+    config = load_config()
+    logger = configure_logging(config)
+
+    if not config.telegram_bot_token:
+        logger.error("TELEGRAM_BOT_TOKEN is not configured. Set it in .env.")
+        return 1
+
+    if not config.openai_api_key:
+        logger.warning("OPENAI_API_KEY is empty. LLM features will be limited.")
+
+    logger.info("Starting Telegram PC assistant...")
+    service = TelegramBotService(config=config, logger=logging.getLogger("bot"))
+    service.run()
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+Файл: bot/telegram_handler.py
+Назначение: подключение к Telegram Bot API, регистрация обработчиков, прием текста и голосовых сообщений.
+
+Ключевые строки:
+
+class TelegramBotService:
+    def __init__(self, config: AppConfig, logger: logging.Logger) -> None:
+        self.config = config
+        self.logger = logger
+        self.router = CommandsRouter(config=config, logger=logger.getChild("router"))
+        self.speech = SpeechToText(model_size=config.stt_model_size)
+
+        self.application = Application.builder().token(config.telegram_bot_token).build()
+        self._register_handlers()
+
+    def run(self) -> None:
+        self.logger.info("Bot is polling updates...")
+        self.application.run_polling(drop_pending_updates=True)
+
+    def _register_handlers(self) -> None:
+        self.application.add_handler(CommandHandler("start", self.handle_start))
+        self.application.add_handler(CommandHandler("help", self.handle_help))
+        self.application.add_handler(CallbackQueryHandler(self.handle_confirmation, pattern=r"^(confirm|cancel):"))
+        self.application.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, self.handle_voice))
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
+
+    async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._authorize(update):
+            return
+        chat_id = update.effective_chat.id
+        user_id = update.effective_user.id
+        text = update.effective_message.text or ""
+
+        result = await asyncio.to_thread(self.router.handle_text, chat_id, user_id, text)
+        await self._send_route_result(update, result)
+
+    async def handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        tg_file = await context.bot.get_file(file_id)
+        await tg_file.download_to_drive(custom_path=str(source_path))
+        await asyncio.to_thread(convert_to_wav, source_path, wav_path)
+
+        transcription = await asyncio.to_thread(
+            self.speech.transcribe,
+            audio_for_stt,
+            self.config.interface_language,
+        )
+
+        result = await asyncio.to_thread(self.router.handle_text, chat_id, user_id, transcription.text)
+        await self._send_route_result(update, result)
+
+    async def _send_route_result(self, update: Update, result: RouteResult) -> None:
+        if result.confirmation_id:
+            await message.reply_text(
+                result.message,
+                reply_markup=build_confirmation_keyboard(result.confirmation_id),
+            )
+            return
+
+        if result.attachment_path:
+            with path.open("rb") as f:
+                await update.get_bot().send_document(chat_id=chat_id, document=f, caption=result.message)
+            return
+
+        await message.reply_text(result.message)
+
+
+Файл: bot/commands_router.py
+Назначение: центральный маршрутизатор команд, проверка лимитов, локальные команды, LLM-команды, подтверждения и вызов инструментов.
+
+Ключевые строки:
+
+@dataclass(slots=True)
+class RouteResult:
+    message: str
+    confirmation_id: str | None = None
+    confirmation_text: str | None = None
+    attachment_path: str | None = None
+
+class CommandsRouter:
+    def __init__(self, config: AppConfig, logger: logging.Logger) -> None:
+        self.config = config
+        self.logger = logger
+
+        self.policy = CommandPolicy(
+            allowed_dirs=self.config.allowed_dirs,
+            allowed_apps=self.config.allowed_apps,
+            allowed_network_hosts=self.config.allowed_network_hosts,
+        )
+
+        self.file_tools = FileTools(
+            allowed_dirs=self.config.allowed_dirs,
+            max_files_per_operation=self.config.max_files_per_operation,
+        )
+
+        self.llm = OpenAIOrchestrator(
+            api_key=self.config.openai_api_key,
+            primary_model=self.config.openai_model_primary,
+            secondary_model=self.config.openai_model_secondary,
+            fallback_model=self.config.openai_model_fallback,
+            system_prompt=SYSTEM_PROMPT_RU,
+        )
+
+    def handle_text(self, chat_id: int, user_id: int, text: str) -> RouteResult:
+        text = (text or "").strip()
+        if not self._check_rate_limit(user_id):
+            return RouteResult(message="Too many commands.")
+
+        local_result = self._handle_quick_button(chat_id, user_id, text)
+        if local_result is not None:
+            return local_result
+
+        parsed_result = self._try_parse_local_text(chat_id, user_id, text)
+        if parsed_result is not None:
+            return parsed_result
+
+        return self._handle_with_llm(chat_id, user_id, text)
+
+    def _handle_with_llm(self, chat_id: int, user_id: int, text: str) -> RouteResult:
+        context = self.context_manager.get_context(chat_id)
+        self.context_manager.add_user_message(chat_id=chat_id, user_id=user_id, content=text)
+
+        def execute_tool(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+            return self._execute_action(
+                chat_id=chat_id,
+                user_id=user_id,
+                action=tool_name,
+                args=args,
+                confirmed=False,
+            )
+
+        response = self.llm.respond(
+            chat_context=context,
+            user_text=text,
+            tools=self.tool_schemas,
+            tool_executor=execute_tool,
+        )
+        return RouteResult(message=response.text or "Готово.")
+
+    def _execute_action(
+        self,
+        chat_id: int,
+        user_id: int,
+        action: str,
+        args: dict[str, Any],
+        confirmed: bool,
+    ) -> dict[str, Any]:
+        decision = self.policy.evaluate(action=action, args=args, confirmed=confirmed)
+        if not decision.allowed:
+            return {"status": "blocked", "reason": decision.reason}
+
+        if decision.requires_confirmation:
+            action_id = self._register_pending_action(chat_id, user_id, action, decision.normalized_args)
+            return {"status": "confirmation_required", "action_id": action_id}
+
+        result = self._dispatch_action(action, decision.normalized_args or args)
+        self._log_tool_call(chat_id, user_id, action, args, "ok", result)
+        return {"status": "ok", "action": action, "result": result}
+
+    def _dispatch_action(self, action: str, args: dict[str, Any]) -> dict[str, Any]:
+        if action == "find_file_by_name":
+            return self.file_tools.find_file_by_name(name=str(args["name"]), scope_dirs=args.get("scope_dirs"))
+        if action == "send_file_to_chat":
+            path_info = self.file_tools.path_exists(str(args["path"]))
+            return {"status": "ok", "action": "send_file_to_chat", "path": path_info["path"]}
+        if action == "schedule_shutdown":
+            return self.scheduler_tools.schedule_shutdown(minutes=int(args["minutes"]))
+        if action == "check_internet":
+            return self.network_tools.check_internet()
+        raise ValueError(f"Unsupported action: {action}")
+
+
+Файл: llm/openai_client.py
+Назначение: работа с OpenAI Responses API, выбор модели, function calling и обработка результатов инструментов.
+
+Ключевые строки:
+
+@dataclass(slots=True)
+class LLMResponse:
+    text: str
+    used_model: str | None
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+class OpenAIOrchestrator:
+    def __init__(
+        self,
+        api_key: str,
+        primary_model: str,
+        secondary_model: str,
+        fallback_model: str,
+        system_prompt: str,
+        max_turn_tool_calls: int = 8,
+    ) -> None:
+        self.system_prompt = system_prompt
+        self.max_turn_tool_calls = max_turn_tool_calls
+        self.models = [primary_model, secondary_model, fallback_model]
+        self.client = OpenAI(api_key=api_key) if api_key else None
+
+    def respond(
+        self,
+        chat_context: list[dict[str, str]],
+        user_text: str,
+        tools: list[dict],
+        tool_executor: ToolExecutor,
+    ) -> LLMResponse:
+        if self.client is None:
+            return LLMResponse(text="LLM недоступен.", used_model=None)
+
+        for model in self._iter_models():
+            try:
+                return self._respond_single_model(
+                    model=model,
+                    chat_context=chat_context,
+                    user_text=user_text,
+                    tools=tools,
+                    tool_executor=tool_executor,
+                )
+            except Exception as exc:
+                errors.append(f"{model}: {exc}")
+
+    def _respond_single_model(...):
+        response = self.client.responses.create(
+            model=model,
+            input=input_items,
+            tools=tools,
+        )
+
+        for _ in range(self.max_turn_tool_calls):
+            function_calls = [item for item in response.output if item.type == "function_call"]
+            if not function_calls:
+                break
+
+            for call in function_calls:
+                parsed_args = json.loads(call.arguments or "{}")
+                result = tool_executor(call.name, parsed_args)
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": call.call_id,
+                    "output": json.dumps(result, ensure_ascii=False),
+                })
+
+            response = self.client.responses.create(
+                model=model,
+                previous_response_id=response.id,
+                input=tool_outputs,
+                tools=tools,
+            )
+
+        return LLMResponse(text=self._extract_text(response), used_model=model, tool_calls=all_tool_calls)
+
+
+Файл: security/policy.py
+Назначение: слой безопасности, allowlist действий, проверка путей, приложений, сетевых хостов и подтверждений.
+
+Ключевые строки:
+
+@dataclass(slots=True)
+class PolicyDecision:
+    allowed: bool
+    requires_confirmation: bool = False
+    reason: str = ""
+    normalized_args: dict[str, Any] = field(default_factory=dict)
+
+class CommandPolicy:
+    def __init__(
+        self,
+        allowed_dirs: list[Path],
+        allowed_apps: dict[str, str],
+        allowed_network_hosts: list[str],
+        allowed_actions: set[str] | None = None,
+    ) -> None:
+        self.allowed_dirs = [path.resolve() for path in allowed_dirs]
+        self.allowed_apps = {k.lower(): v for k, v in allowed_apps.items()}
+        self.allowed_network_hosts = {host.lower() for host in allowed_network_hosts}
+        self.allowed_actions = allowed_actions or set(ALLOWED_TOOL_ACTIONS)
+
+    def evaluate(self, action: str, args: dict[str, Any] | None, confirmed: bool = False) -> PolicyDecision:
+        normalized_args = self._normalize_args(args or {})
+
+        if action not in self.allowed_actions:
+            return PolicyDecision(False, reason=f"Action '{action}' is not in allowlist.")
+
+        for pattern in BLOCKED_PATTERNS:
+            if pattern.search(json.dumps(normalized_args, ensure_ascii=False)):
+                return PolicyDecision(False, reason="Blocked by security pattern.")
+
+        path_check = self._validate_paths(action, normalized_args)
+        if path_check is not None:
+            return path_check
+
+        if action in DANGEROUS_ACTIONS and not confirmed:
+            return PolicyDecision(
+                allowed=True,
+                requires_confirmation=True,
+                reason=f"Action '{action}' requires user confirmation.",
+                normalized_args=normalized_args,
+            )
+
+        return PolicyDecision(True, normalized_args=normalized_args)
+
+    def _is_allowed_path(self, path: Path) -> bool:
+        for allowed in self.allowed_dirs:
+            try:
+                path.resolve().relative_to(allowed.resolve())
+                return True
+            except ValueError:
+                continue
+        return False
+
+
+Файл: speech/speech_to_text.py
+Назначение: локальное распознавание речи через faster-whisper.
+
+Ключевые строки:
+
+@dataclass(slots=True)
+class TranscriptionResult:
+    text: str
+    confidence: float
+    low_confidence: bool
+
+class SpeechToText:
+    def __init__(self, model_size: str = "small") -> None:
+        self.model_size = model_size
+        self._model = None
+
+    def transcribe(self, audio_path: Path, language: str = "ru") -> TranscriptionResult:
+        model = self._get_model()
+        segments, info = model.transcribe(
+            str(audio_path),
+            language=language,
+            vad_filter=True,
+            beam_size=5,
+        )
+
+        full_text = " ".join(texts).strip()
+        confidence = (avg_conf + language_prob) / 2 if confidences else language_prob
+        low_confidence = confidence < 0.45 or not full_text
+        return TranscriptionResult(text=full_text, confidence=confidence, low_confidence=low_confidence)
+
+    def _get_model(self):
+        from faster_whisper import WhisperModel
+        self._model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+        return self._model
+
+
+Файл: storage/db.py
+Назначение: SQLite-хранилище истории диалогов и журнала вызовов инструментов.
+
+Ключевые строки:
+
+@dataclass(slots=True)
+class StorageDB:
+    db_path: Path
+
+    def __post_init__(self) -> None:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._init_db()
+
+    def add_history(self, chat_id: int, user_id: int, role: str, content: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO history(chat_id, user_id, role, content, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chat_id, user_id, role, content, datetime.utcnow().isoformat()),
+            )
+
+    def get_recent_history(self, chat_id: int, limit: int = 20) -> list[dict]:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT chat_id, user_id, role, content, created_at
+                FROM history
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+        data = [dict(row) for row in rows]
+        data.reverse()
+        return data
+
+    def add_tool_call(
+        self,
+        chat_id: int,
+        user_id: int,
+        tool_name: str,
+        args_json: str,
+        status: str,
+        result_json: str,
+    ) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO tool_calls(chat_id, user_id, tool_name, args_json, status, result_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id, user_id, tool_name, args_json, status, result_json, datetime.utcnow().isoformat()),
+            )
+
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tool_calls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    tool_name TEXT NOT NULL,
+                    args_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )

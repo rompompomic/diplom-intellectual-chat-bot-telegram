@@ -70,3 +70,21 @@ def test_cancel_confirmation(router: CommandsRouter) -> None:
 
     cancelled = router.confirm_action(chat_id=1, user_id=1, action_id=first.confirmation_id, approve=False)
     assert "отменено" in cancelled.message.lower()
+def test_find_in_downloads_and_send_uses_fuzzy_local_search(
+    router: CommandsRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("LLM should not be called for local find-and-send intent")
+
+    monkeypatch.setattr(router, "_handle_with_llm", fail_llm)
+    target = router.config.allowed_dirs[0] / "Рисунок 5.png"
+    target.write_text("x", encoding="utf-8")
+
+    result = router.handle_text(
+        chat_id=1,
+        user_id=1,
+        text="Привет, найди в загрузках рисунок 5PNG и отправь мне его сюда.",
+    )
+
+    assert result.attachment_path == str(target)

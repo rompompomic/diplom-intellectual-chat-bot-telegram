@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import zipfile
 from dataclasses import dataclass
@@ -24,23 +25,84 @@ class FileTools:
         limit = max(1, min(limit, self.max_files_per_operation))
         search_roots = self._resolve_scope_dirs(scope_dirs)
         needle = name.strip().lower()
+        fuzzy_query = self._build_fuzzy_query(name)
         results: list[str] = []
+        fuzzy_results: list[tuple[int, str]] = []
         for root in search_roots:
             for path in self._iter_files(root):
                 if len(results) >= limit:
                     break
-                if needle not in path.name.lower():
-                    continue
                 try:
                     if not path.is_file():
                         continue
                 except (FileNotFoundError, PermissionError, OSError):
                     continue
-                else:
+
+                path_name = path.name.lower()
+                if needle and needle in path_name:
                     results.append(str(path))
+                    continue
+
+                score = self._score_fuzzy_file_match(path, fuzzy_query)
+                if score > 0:
+                    fuzzy_results.append((score, str(path)))
             if len(results) >= limit:
                 break
+        if len(results) < limit and fuzzy_results:
+            seen = set(results)
+            fuzzy_results.sort(key=lambda item: (-item[0], item[1].lower()))
+            for _, path in fuzzy_results:
+                if path in seen:
+                    continue
+                results.append(path)
+                seen.add(path)
+                if len(results) >= limit:
+                    break
         return {"query": name, "count": len(results), "files": results}
+
+    def _build_fuzzy_query(self, name: str) -> dict:
+        normalized = self._normalize_search_text(name)
+        parts = [part for part in normalized.split() if part]
+        extensions = {
+            part.lstrip(".")
+            for part in parts
+            if part.lstrip(".") in {"png", "jpg", "jpeg", "webp", "gif", "pdf", "doc", "docx", "txt", "md", "zip"}
+        }
+        terms = [part for part in parts if part.lstrip(".") not in extensions]
+        return {"terms": terms, "extensions": extensions}
+
+    def _score_fuzzy_file_match(self, path: Path, query: dict) -> int:
+        terms: list[str] = query["terms"]
+        extensions: set[str] = query["extensions"]
+        if not terms and not extensions:
+            return 0
+
+        extension = path.suffix.lower().lstrip(".")
+        if extensions and extension not in extensions:
+            return 0
+
+        haystack = self._normalize_search_text(path.stem)
+        matched_terms = 0
+        score = 20 if extensions else 0
+        for term in terms:
+            if term in haystack:
+                matched_terms += 1
+                score += 10 + len(term)
+
+        if terms and matched_terms == 0:
+            return 0
+        if terms and matched_terms < len(terms) and len(terms) <= 2:
+            return 0
+        return score
+
+    def _normalize_search_text(self, value: str) -> str:
+        value = value.lower()
+        value = re.sub(r"([а-яa-z])(\d)", r"\1 \2", value)
+        value = re.sub(r"(\d)([а-яa-z])", r"\1 \2", value)
+        value = re.sub(r"\b(jpe?g|png|webp|gif|pdf|docx?|txt|md|zip)\b", r" \1 ", value)
+        value = value.replace(".", " ")
+        value = re.sub(r"[^0-9a-zа-яё]+", " ", value, flags=re.IGNORECASE)
+        return " ".join(value.split())
 
     def _iter_files(self, root: Path) -> Iterable[Path]:
         if not root.exists():
