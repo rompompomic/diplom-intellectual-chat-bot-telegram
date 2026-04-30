@@ -252,6 +252,10 @@ class CommandsRouter:
         if find_and_send_result is not None:
             return find_and_send_result
 
+        find_result = self._try_handle_find_file_request(chat_id, user_id, text)
+        if find_result is not None:
+            return find_result
+
         find_match = re.match(r"^\s*найди\s+файл\s+(.+)$", lowered, re.IGNORECASE)
         if find_match:
             query = text.split(maxsplit=2)[-1]
@@ -370,12 +374,43 @@ class CommandsRouter:
             suffix = f"\nНашёл ещё вариантов: {len(files) - 1}. Отправляю самый похожий."
         return RouteResult(message=f"Нашёл файл: {path}{suffix}", attachment_path=path)
 
+    def _try_handle_find_file_request(self, chat_id: int, user_id: int, text: str) -> RouteResult | None:
+        lowered = text.lower()
+        wants_find = "найди" in lowered or "найти" in lowered or "отыщи" in lowered or "поищи" in lowered
+        if not wants_find:
+            return None
+
+        query = self._extract_file_search_query(text)
+        if not query:
+            return None
+
+        scope_dirs = None
+        if "загруз" in lowered:
+            downloads = self._find_allowed_dir_by_name("downloads")
+            if downloads is not None:
+                scope_dirs = [str(downloads)]
+
+        result = self._execute_action(
+            chat_id,
+            user_id,
+            "find_file_by_name",
+            {"name": query, "scope_dirs": scope_dirs},
+            confirmed=True,
+        )
+        return self._route_result_from_tool("find_file_by_name", result)
+
     def _extract_file_search_query(self, text: str) -> str:
         query = re.sub(r"^\s*(привет|здравствуй|добрый день)[,!\s]*", "", text, flags=re.IGNORECASE)
         query = re.sub(r"\b(найди|найти|отыщи)\b", " ", query, count=1, flags=re.IGNORECASE)
         query = re.sub(r"\b(в|из)\s+(папке\s+)?(загрузках|загрузки|downloads)\b", " ", query, flags=re.IGNORECASE)
         query = re.sub(r"\b(и\s+)?(отправь|отправить|пришли|скинь|перешли)\b.*$", " ", query, flags=re.IGNORECASE)
         query = re.sub(r"\b(мне|его|её|ее|сюда|файл|картинку|изображение)\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"^\s*(привет|здравствуй|добрый день)[,!\s]*", "", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(найди|найти|отыщи|поищи|пожалуйста|файл|папку|каталог|директорию)\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(дамп|бэкап|сайта|сайт)\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(в|из)\s+(папке\s+)?(загрузках|загрузки|downloads)\b", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(и\s+)?(отправь|отправить|пришли|скинь|перешли)\b.*$", " ", query, flags=re.IGNORECASE)
+        query = re.sub(r"\b(мне|его|её|ее|сюда|картинку|изображение)\b", " ", query, flags=re.IGNORECASE)
         return " ".join(query.strip(" .,!?:;\"'").split())
 
     def _find_allowed_dir_by_name(self, name: str) -> Path | None:

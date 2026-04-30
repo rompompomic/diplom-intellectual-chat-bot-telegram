@@ -79,6 +79,17 @@ def test_find_file_by_name_interprets_spoken_png_request(tmp_path: Path) -> None
     assert found["files"] == [str(target)]
 
 
+def test_find_file_by_name_finds_matching_folder(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    target = allowed / "download_steelpro_1766317200_53084"
+    target.mkdir(parents=True)
+
+    tools = FileTools(allowed_dirs=[allowed], max_files_per_operation=100)
+    found = tools.find_file_by_name("steelpro")
+
+    assert str(target) in found["files"]
+
+
 def test_file_tools_block_outside_path(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()

@@ -29,11 +29,11 @@ class FileTools:
         results: list[str] = []
         fuzzy_results: list[tuple[int, str]] = []
         for root in search_roots:
-            for path in self._iter_files(root):
+            for path in self._iter_paths(root):
                 if len(results) >= limit:
                     break
                 try:
-                    if not path.is_file():
+                    if not path.is_file() and not path.is_dir():
                         continue
                 except (FileNotFoundError, PermissionError, OSError):
                     continue
@@ -77,11 +77,11 @@ class FileTools:
         if not terms and not extensions:
             return 0
 
-        extension = path.suffix.lower().lstrip(".")
+        extension = path.suffix.lower().lstrip(".") if path.is_file() else ""
         if extensions and extension not in extensions:
             return 0
 
-        haystack = self._normalize_search_text(path.stem)
+        haystack = self._normalize_search_text(path.stem if path.is_file() else path.name)
         matched_terms = 0
         score = 20 if extensions else 0
         for term in terms:
@@ -104,7 +104,7 @@ class FileTools:
         value = re.sub(r"[^0-9a-zа-яё]+", " ", value, flags=re.IGNORECASE)
         return " ".join(value.split())
 
-    def _iter_files(self, root: Path) -> Iterable[Path]:
+    def _iter_paths(self, root: Path) -> Iterable[Path]:
         if not root.exists():
             return
 
@@ -112,7 +112,9 @@ class FileTools:
             return None
 
         try:
-            for dirpath, _, filenames in os.walk(root, onerror=ignore_walk_error, followlinks=False):
+            for dirpath, dirnames, filenames in os.walk(root, onerror=ignore_walk_error, followlinks=False):
+                for dirname in dirnames:
+                    yield Path(dirpath) / dirname
                 for filename in filenames:
                     yield Path(dirpath) / filename
         except (FileNotFoundError, PermissionError, OSError):

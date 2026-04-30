@@ -97,3 +97,19 @@ def test_cancel_last_scheduled_task_button_returns_human_message(router: Command
 
     assert not result.message.strip().startswith("{")
     assert scheduled["job_id"] in result.message
+
+
+def test_find_site_dump_searches_names_and_folders_locally(
+    router: CommandsRouter,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_llm(*args, **kwargs):
+        raise AssertionError("LLM should not be called for local find intent")
+
+    monkeypatch.setattr(router, "_handle_with_llm", fail_llm)
+    target = router.config.allowed_dirs[3] / "download_steelpro_1766317200_53084"
+    target.mkdir(parents=True)
+
+    result = router.handle_text(chat_id=1, user_id=1, text="Найди пожалуйста дамп сайта steelpro")
+
+    assert str(target) in result.message
