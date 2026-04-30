@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import tools.file_tools as file_tools_module
 from tools.file_tools import FileTools
 
 
@@ -45,6 +46,25 @@ def test_file_tools_create_folder_and_find(tmp_path: Path) -> None:
     target.write_text("x", encoding="utf-8")
     found = tools.find_file_by_name("notes")
     assert found["count"] >= 1
+
+
+def test_find_file_by_name_ignores_walk_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    target = allowed / "project_notes.txt"
+    target.write_text("x", encoding="utf-8")
+
+    def fake_walk(root: Path, onerror=None, followlinks: bool = False):  # noqa: ANN001
+        if onerror is not None:
+            onerror(FileNotFoundError(str(root / "missing")))
+        yield str(root), [], [target.name]
+
+    monkeypatch.setattr(file_tools_module.os, "walk", fake_walk)
+
+    tools = FileTools(allowed_dirs=[allowed], max_files_per_operation=100)
+    found = tools.find_file_by_name("notes")
+
+    assert found["files"] == [str(target)]
 
 
 def test_file_tools_block_outside_path(tmp_path: Path) -> None:

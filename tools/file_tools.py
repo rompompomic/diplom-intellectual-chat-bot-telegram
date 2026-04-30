@@ -26,14 +26,35 @@ class FileTools:
         needle = name.strip().lower()
         results: list[str] = []
         for root in search_roots:
-            for path in root.rglob("*"):
+            for path in self._iter_files(root):
                 if len(results) >= limit:
                     break
-                if path.is_file() and needle in path.name.lower():
+                if needle not in path.name.lower():
+                    continue
+                try:
+                    if not path.is_file():
+                        continue
+                except (FileNotFoundError, PermissionError, OSError):
+                    continue
+                else:
                     results.append(str(path))
             if len(results) >= limit:
                 break
         return {"query": name, "count": len(results), "files": results}
+
+    def _iter_files(self, root: Path) -> Iterable[Path]:
+        if not root.exists():
+            return
+
+        def ignore_walk_error(_: OSError) -> None:
+            return None
+
+        try:
+            for dirpath, _, filenames in os.walk(root, onerror=ignore_walk_error, followlinks=False):
+                for filename in filenames:
+                    yield Path(dirpath) / filename
+        except (FileNotFoundError, PermissionError, OSError):
+            return
 
     def rename_file(self, path: str, new_name: str) -> dict:
         src = self._resolve_allowed_path(path)

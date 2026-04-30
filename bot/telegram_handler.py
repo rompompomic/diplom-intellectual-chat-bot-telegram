@@ -17,7 +17,7 @@ from telegram.ext import (
 from bot.commands_router import CommandsRouter, RouteResult
 from bot.keyboards import build_confirmation_keyboard, build_main_keyboard
 from config import AppConfig
-from speech.audio_utils import build_temp_audio_path, convert_to_wav, safe_remove
+from speech.audio_utils import AudioDependencyError, build_temp_audio_path, convert_to_wav, safe_remove
 from speech.speech_to_text import SpeechToText
 
 
@@ -126,6 +126,12 @@ class TelegramBotService:
 
             result = await asyncio.to_thread(self.router.handle_text, chat_id, user_id, transcription.text)
             await self._send_route_result(update, result)
+        except AudioDependencyError as exc:
+            self.logger.error("Voice command processing failed: %s", exc)
+            await message.reply_text(
+                "Voice input is not configured: install FFmpeg and add its bin folder to PATH, "
+                "then restart the bot."
+            )
         except Exception as exc:  # noqa: BLE001
             self.logger.exception("Voice command processing failed.")
             await message.reply_text(f"Ошибка обработки голосового сообщения: {exc}")
