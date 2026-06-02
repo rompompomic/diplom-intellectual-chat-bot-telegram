@@ -159,8 +159,10 @@ class CommandsRouter:
 
     def _handle_with_llm(self, chat_id: int, user_id: int, text: str) -> RouteResult:
         context = self.context_manager.get_context(chat_id)
+        context = [self._build_local_context_message(), *context]
         self.context_manager.add_user_message(chat_id=chat_id, user_id=user_id, content=text)
         confirmation_ids: list[str] = []
+        blocked_results: list[tuple[str, dict[str, Any]]] = []
         attachments: list[str] = []
 
         def execute_tool(tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
@@ -173,6 +175,8 @@ class CommandsRouter:
             )
             if result.get("status") == "confirmation_required":
                 confirmation_ids.append(str(result["action_id"]))
+            elif result.get("status") == "blocked":
+                blocked_results.append((tool_name, result))
             
             payload = result.get("result", result)
             if tool_name in ("take_screenshot", "send_file_to_chat"):
@@ -196,13 +200,41 @@ class CommandsRouter:
                 confirmation_text=pending.summary,
             )
 
+        if blocked_results:
+            action, result = blocked_results[-1]
+            routed = self._route_result_from_tool(action, result)
+            self.context_manager.add_assistant_message(chat_id=chat_id, user_id=user_id, content=routed.message)
+            return routed
+
         assistant_text = response.text or "Готово."
         self.context_manager.add_assistant_message(chat_id=chat_id, user_id=user_id, content=assistant_text)
         if response.errors:
             self.logger.warning("OpenAI fallback errors: %s", "; ".join(response.errors))
+
+        if response.tool_calls and self._looks_like_raw_json(assistant_text):
+            last_call = response.tool_calls[-1]
+            tool_name = str(last_call.get("name", ""))
+            tool_result = last_call.get("result")
+            if tool_name and isinstance(tool_result, dict):
+                routed = self._route_result_from_tool(tool_name, tool_result)
+                self.context_manager.add_assistant_message(chat_id=chat_id, user_id=user_id, content=routed.message)
+                return routed
         
         attachment_path = attachments[-1] if attachments else None
         return RouteResult(message=assistant_text, attachment_path=attachment_path)
+
+    def _build_local_context_message(self) -> dict[str, str]:
+        allowed_apps = ", ".join(sorted(self.config.allowed_apps)) or "none"
+        return {
+            "role": "system",
+            "content": (
+                "Local app allowlist:\n"
+                f"- Allowed app aliases for open_app/schedule_open_app: {allowed_apps}\n"
+                "- When opening or scheduling an app, use one of these exact aliases in the app argument. "
+                "Do not ask the user to choose Chrome/Edge/Firefox if an alias like browser, default browser, "
+                "браузер, or браузер по умолчанию is available."
+            ),
+        }
 
     def _handle_quick_button(self, chat_id: int, user_id: int, text: str) -> RouteResult | None:
         mapping: dict[str, tuple[str, dict[str, Any]]] = {
@@ -261,18 +293,6 @@ class CommandsRouter:
             query = text.split(maxsplit=2)[-1]
             result = self._execute_action(chat_id, user_id, "find_file_by_name", {"name": query}, confirmed=True)
             return self._route_result_from_tool("find_file_by_name", result)
-
-        shutdown_match = re.search(r"выключи.+через\s+(\d+)\s+мин", lowered, re.IGNORECASE)
-        if shutdown_match:
-            minutes = int(shutdown_match.group(1))
-            result = self._execute_action(
-                chat_id,
-                user_id,
-                "schedule_shutdown",
-                {"minutes": minutes},
-                confirmed=False,
-            )
-            return self._route_result_from_tool("schedule_shutdown", result)
 
         open_app_match = re.search(r"через\s+(\d+)\s+мин.*(?:запусти|открой)\s+(.+)$", lowered, re.IGNORECASE)
         if open_app_match:
@@ -532,17 +552,23 @@ class CommandsRouter:
                 app_name=app_name,
                 app_path=app_path,
                 minutes=int(args["minutes"]),
+                url=args.get("url"),
             )
         if action == "open_app":
             app_name = str(args["app"]).strip().lower()
             app_path = self.config.allowed_apps[app_name]
-            return self.scheduler_tools.open_app(app_path=app_path)
+            return self.scheduler_tools.open_app(app_path=app_path, url=args.get("url"))
         if action == "enable_startup":
             return self.startup_tools.enable_startup()
         if action == "disable_startup":
             return self.startup_tools.disable_startup()
         if action == "get_system_info":
             return self.shell_tools.get_system_info()
+        if action == "run_safe_command":
+            return self.shell_tools.run_safe_command(
+                command=str(args.get("command", "")),
+                args=dict(args.get("args") or {}),
+            )
         if action == "get_local_ip":
             return self.network_tools.get_local_ip()
         if action == "get_public_ip":
@@ -627,7 +653,7 @@ class CommandsRouter:
             )
 
         if result.get("status") == "blocked":
-            return RouteResult(message=f"Команда заблокирована политикой безопасности: {result.get('reason')}")
+            return RouteResult(message=self._format_blocked_result(str(result.get("reason", ""))))
 
         if result.get("status") == "error":
             return RouteResult(message=f"Ошибка выполнения: {result.get('error')}")
@@ -690,7 +716,10 @@ class CommandsRouter:
             tasks = payload.get("tasks", [])
             if not tasks:
                 return "Запланированных задач нет."
-            lines = [f"{t['job_id']} -> {t['next_run_time']}" for t in tasks]
+            lines = [
+                f"{self._describe_job_name(t.get('name'))}: {self._format_datetime_for_user(t.get('next_run_time'))}"
+                for t in tasks
+            ]
             return "Запланированные задачи:\n" + "\n".join(lines)
 
         if action == "take_screenshot":
@@ -703,14 +732,33 @@ class CommandsRouter:
             online = payload.get("online")
             return "Интернет доступен." if online else f"Интернет недоступен: {payload.get('error', '')}"
 
+        if action in {"get_system_info", "run_safe_command"}:
+            stdout = str(payload.get("stdout") or "").strip()
+            stderr = str(payload.get("stderr") or "").strip()
+            returncode = payload.get("returncode")
+            if stdout:
+                return stdout
+            if stderr:
+                return f"Команда завершилась с кодом {returncode}:\n{stderr}"
+            return f"Команда завершилась с кодом {returncode}, вывода нет."
+
         if action == "schedule_shutdown":
-            return f"Выключение запланировано. ID: {payload.get('job_id')}, время: {payload.get('run_at')}"
+            run_at = self._format_datetime_for_user(payload.get("run_at"))
+            return f"Готово. Компьютер выключится {run_at}."
 
         if action == "schedule_open_app":
+            run_at = self._format_datetime_for_user(payload.get("run_at"))
+            target = payload.get("target")
+            target_text = f" ({target})" if target and str(target).startswith(("http://", "https://")) else ""
             return (
-                f"Запуск приложения '{payload.get('app')}' запланирован. "
-                f"ID: {payload.get('job_id')}, время: {payload.get('run_at')}"
+                f"Готово. Открою '{payload.get('app')}'{target_text} {run_at}."
             )
+
+        if action == "cancel_shutdown":
+            cancelled = int(payload.get("cancelled") or 0)
+            if cancelled > 0:
+                return "Отменил запланированное выключение компьютера."
+            return "Активного запланированного выключения не нашёл."
 
         if action == "create_ps1":
             return (
@@ -730,6 +778,53 @@ class CommandsRouter:
             return "Запланированная задача отменена."
 
         return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    @staticmethod
+    def _format_blocked_result(reason: str) -> str:
+        if reason == "System path operations are blocked.":
+            return "Нельзя удалять или изменять системные файлы и папки Windows."
+        if "outside allowed directories" in reason.lower():
+            return "Нельзя выполнить операцию: путь находится вне разрешённых папок."
+        if reason:
+            return f"Нельзя выполнить операцию: {reason}"
+        return "Нельзя выполнить операцию: она заблокирована правилами безопасности."
+
+    @staticmethod
+    def _format_datetime_for_user(value: Any) -> str:
+        if value is None:
+            return "в указанное время"
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            try:
+                dt = datetime.fromisoformat(str(value))
+            except ValueError:
+                return str(value)
+
+        now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+        time_part = dt.strftime("%H:%M")
+        if dt.date() == now.date():
+            return f"сегодня в {time_part}"
+        if (dt.date() - now.date()).days == 1:
+            return f"завтра в {time_part}"
+        return dt.strftime("%d.%m.%Y в %H:%M")
+
+    @staticmethod
+    def _describe_job_name(value: Any) -> str:
+        name = str(value or "").lower()
+        if "shutdown" in name:
+            return "Выключение компьютера"
+        if "open_app" in name or "open_app:" in name:
+            app = name.split(":", 1)[-1] if ":" in name else ""
+            return f"Запуск {app}".strip()
+        return "Задача"
+
+    @staticmethod
+    def _looks_like_raw_json(text: str) -> bool:
+        stripped = (text or "").strip()
+        return (stripped.startswith("{") and stripped.endswith("}")) or (
+            stripped.startswith("[") and stripped.endswith("]")
+        )
 
     def _create_text_file(self, filename: str, content: str, extension: str) -> dict[str, Any]:
         out_path = self._resolve_output_path(filename, extension)

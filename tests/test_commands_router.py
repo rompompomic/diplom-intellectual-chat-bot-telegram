@@ -58,6 +58,16 @@ def test_keyboard_find_file_button_is_local(router: CommandsRouter, monkeypatch:
     assert "Найди файл" in result.message
 
 
+def test_local_context_lists_allowed_app_aliases(router: CommandsRouter) -> None:
+    router.config.allowed_apps["браузер по умолчанию"] = "https://www.google.com"
+
+    message = router._build_local_context_message()
+
+    assert message["role"] == "system"
+    assert "браузер по умолчанию" in message["content"]
+    assert "exact aliases" in message["content"]
+
+
 def test_dangerous_clean_downloads_requires_confirmation(router: CommandsRouter) -> None:
     result = router.handle_text(chat_id=1, user_id=1, text="Почисти папку Загрузки")
     assert result.confirmation_id is not None
@@ -97,6 +107,48 @@ def test_cancel_last_scheduled_task_button_returns_human_message(router: Command
 
     assert not result.message.strip().startswith("{")
     assert scheduled["job_id"] in result.message
+
+
+def test_schedule_shutdown_returns_human_message(router: CommandsRouter) -> None:
+    result = router._route_result_from_tool(
+        "schedule_shutdown",
+        {
+            "status": "ok",
+            "action": "schedule_shutdown",
+            "result": {
+                "status": "ok",
+                "job_id": "shutdown_1780417518",
+                "run_at": "2026-06-02T21:25:18.134282",
+            },
+        },
+    )
+
+    assert "ID:" not in result.message
+    assert "T21:25" not in result.message
+    assert "21:25" in result.message
+
+
+def test_cancel_shutdown_returns_human_message(router: CommandsRouter) -> None:
+    result = router._route_result_from_tool(
+        "cancel_shutdown",
+        {
+            "status": "ok",
+            "action": "cancel_shutdown",
+            "result": {"status": "ok", "cancelled": 1},
+        },
+    )
+
+    assert "cancelled" not in result.message
+    assert "Отменил" in result.message
+
+
+def test_blocked_system_path_returns_plain_refusal(router: CommandsRouter) -> None:
+    result = router._route_result_from_tool(
+        "delete_file",
+        {"status": "blocked", "reason": "System path operations are blocked."},
+    )
+
+    assert result.message == "Нельзя удалять или изменять системные файлы и папки Windows."
 
 
 def test_find_site_dump_searches_names_and_folders_locally(

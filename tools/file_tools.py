@@ -26,12 +26,9 @@ class FileTools:
         search_roots = self._resolve_scope_dirs(scope_dirs)
         needle = name.strip().lower()
         fuzzy_query = self._build_fuzzy_query(name)
-        results: list[str] = []
-        fuzzy_results: list[tuple[int, str]] = []
+        scored_results: list[tuple[int, str]] = []
         for root in search_roots:
             for path in self._iter_paths(root):
-                if len(results) >= limit:
-                    break
                 try:
                     if not path.is_file() and not path.is_dir():
                         continue
@@ -39,25 +36,20 @@ class FileTools:
                     continue
 
                 path_name = path.name.lower()
-                if needle and needle in path_name:
-                    results.append(str(path))
-                    continue
-
                 score = self._score_fuzzy_file_match(path, fuzzy_query)
+                if needle and needle in path_name:
+                    score += 100 + len(needle)
                 if score > 0:
-                    fuzzy_results.append((score, str(path)))
+                    scored_results.append((score, str(path)))
+        results: list[str] = []
+        seen: set[str] = set()
+        for _, path in sorted(scored_results, key=lambda item: (-item[0], item[1].lower())):
+            if path in seen:
+                continue
+            results.append(path)
+            seen.add(path)
             if len(results) >= limit:
                 break
-        if len(results) < limit and fuzzy_results:
-            seen = set(results)
-            fuzzy_results.sort(key=lambda item: (-item[0], item[1].lower()))
-            for _, path in fuzzy_results:
-                if path in seen:
-                    continue
-                results.append(path)
-                seen.add(path)
-                if len(results) >= limit:
-                    break
         return {"query": name, "count": len(results), "files": results}
 
     def _build_fuzzy_query(self, name: str) -> dict:
@@ -68,7 +60,53 @@ class FileTools:
             for part in parts
             if part.lstrip(".") in {"png", "jpg", "jpeg", "webp", "gif", "pdf", "doc", "docx", "txt", "md", "zip"}
         }
-        terms = [part for part in parts if part.lstrip(".") not in extensions]
+        stop_words = {
+            "a",
+            "an",
+            "and",
+            "the",
+            "with",
+            "about",
+            "for",
+            "my",
+            "me",
+            "document",
+            "file",
+            "send",
+            "find",
+            "please",
+            "документ",
+            "файл",
+            "папка",
+            "найди",
+            "найти",
+            "отправь",
+            "отправить",
+            "пришли",
+            "скинь",
+            "мне",
+            "его",
+            "ее",
+            "её",
+            "пожалуйста",
+            "меня",
+            "загрузках",
+            "загрузки",
+            "downloads",
+            "лежит",
+            "оптимизация",
+            "оптимизации",
+            "оптимизацией",
+            "с",
+            "по",
+            "для",
+            "про",
+        }
+        terms = [
+            part
+            for part in parts
+            if part.lstrip(".") not in extensions and part not in stop_words and len(part) > 1
+        ]
         return {"terms": terms, "extensions": extensions}
 
     def _score_fuzzy_file_match(self, path: Path, query: dict) -> int:
@@ -93,10 +131,15 @@ class FileTools:
             return 0
         if terms and matched_terms < len(terms) and len(terms) <= 2:
             return 0
+        if terms and len(terms) >= 3 and matched_terms < 2:
+            return 0
         return score
 
     def _normalize_search_text(self, value: str) -> str:
         value = value.lower()
+        value = re.sub(r"\bceo\b", " seo ", value)
+        value = re.sub(r"\bсео\b", " seo ", value)
+        value = re.sub(r"\bзол[ьъ]?т[а-я]*\b", " zolt ", value)
         value = re.sub(r"([а-яa-z])(\d)", r"\1 \2", value)
         value = re.sub(r"(\d)([а-яa-z])", r"\1 \2", value)
         value = re.sub(r"\b(jpe?g|png|webp|gif|pdf|docx?|txt|md|zip)\b", r" \1 ", value)

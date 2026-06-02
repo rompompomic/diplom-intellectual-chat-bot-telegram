@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable
 
 from openai import OpenAI
@@ -77,14 +78,18 @@ class OpenAIOrchestrator:
         tools: list[dict],
         tool_executor: ToolExecutor,
     ) -> LLMResponse:
-        input_items = [{"role": "system", "content": self.system_prompt}]
+        input_items = [
+            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": self._build_runtime_context()},
+        ]
         input_items.extend(chat_context)
         input_items.append({"role": "user", "content": user_text})
+        response_tools = [*tools, {"type": "web_search"}]
 
         response = self.client.responses.create(
             model=model,
             input=input_items,
-            tools=tools,
+            tools=response_tools,
         )
 
         all_tool_calls: list[dict[str, Any]] = []
@@ -114,7 +119,7 @@ class OpenAIOrchestrator:
                 model=model,
                 previous_response_id=response.id,
                 input=tool_outputs,
-                tools=tools,
+                tools=response_tools,
             )
 
         text = self._extract_text(response)
@@ -130,6 +135,17 @@ class OpenAIOrchestrator:
             seen.add(model)
             ordered.append(model)
         return ordered
+
+    @staticmethod
+    def _build_runtime_context() -> str:
+        now = datetime.now().astimezone()
+        return (
+            "Runtime context:\n"
+            f"- Current computer local datetime: {now.strftime('%Y-%m-%d %H:%M:%S %z')}\n"
+            f"- Current computer local ISO datetime: {now.isoformat()}\n"
+            "- Use this as the reference point for relative time phrases like "
+            "\"через час\", \"сегодня\", \"завтра\", \"к вечеру\"."
+        )
 
     @staticmethod
     def _extract_text(response: Any) -> str:

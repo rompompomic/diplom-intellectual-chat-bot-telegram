@@ -35,6 +35,7 @@ ALLOWED_TOOL_ACTIONS: set[str] = {
     "enable_startup",
     "disable_startup",
     "get_system_info",
+    "run_safe_command",
     "get_local_ip",
     "get_public_ip",
     "check_internet",

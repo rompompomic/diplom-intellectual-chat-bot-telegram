@@ -90,6 +90,35 @@ def test_find_file_by_name_finds_matching_folder(tmp_path: Path) -> None:
     assert str(target) in found["files"]
 
 
+def test_find_file_by_name_prioritizes_distinctive_spoken_terms(tmp_path: Path) -> None:
+    allowed = tmp_path / "Downloads"
+    allowed.mkdir()
+    wrong = allowed / "Документ Microsoft Word (2) (2).docx"
+    target = allowed / "SEO_zolt_task_RU.docx"
+    wrong.write_text("x", encoding="utf-8")
+    target.write_text("x", encoding="utf-8")
+
+    tools = FileTools(allowed_dirs=[allowed], max_files_per_operation=100)
+    found = tools.find_file_by_name("документ CEO оптимизацией Zolt")
+
+    assert found["files"][0] == str(target)
+
+
+def test_find_file_by_name_matches_cyrillic_spoken_zolt(tmp_path: Path) -> None:
+    allowed = tmp_path / "Downloads"
+    backup = allowed / "BackupVEC" / "wp-content" / "languages" / "plugins"
+    backup.mkdir(parents=True)
+    wrong = backup / "wordpress-seo-ru_RU-13c172108e3ebc2555ea54a5cffd763b.json"
+    target = allowed / "SEO_zolt_task_RU.docx"
+    wrong.write_text("x", encoding="utf-8")
+    target.write_text("x", encoding="utf-8")
+
+    tools = FileTools(allowed_dirs=[allowed], max_files_per_operation=100)
+    found = tools.find_file_by_name("у меня в загрузках лежит документ SEO оптимизации зольта")
+
+    assert found["files"][0] == str(target)
+
+
 def test_file_tools_block_outside_path(tmp_path: Path) -> None:
     allowed = tmp_path / "allowed"
     allowed.mkdir()

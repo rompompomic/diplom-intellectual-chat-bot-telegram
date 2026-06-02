@@ -6,6 +6,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 try:
     from apscheduler.executors.pool import ThreadPoolExecutor
@@ -80,34 +81,36 @@ class SchedulerTools:
         subprocess.run(["shutdown", "/a"], capture_output=True, text=True, check=False)
         return {"status": "ok", "cancelled": cancelled}
 
-    def schedule_open_app(self, app_name: str, app_path: str, minutes: int) -> dict:
+    def schedule_open_app(self, app_name: str, app_path: str, minutes: int, url: str | None = None) -> dict:
         if minutes <= 0:
             raise ValueError("minutes must be > 0")
         run_at = datetime.now() + timedelta(minutes=minutes)
         job_id = f"open_app_{app_name}_{int(run_at.timestamp())}"
+        target = self._resolve_open_target(app_path, url)
         if self._scheduler is not None:
             job = self._scheduler.add_job(
                 self._open_app,
                 trigger="date",
                 run_date=run_at,
-                kwargs={"app_path": app_path},
+                kwargs={"app_path": target},
                 id=job_id,
                 replace_existing=False,
             )
             self._last_job_id = job.id
-            return {"status": "ok", "job_id": job.id, "run_at": run_at.isoformat(), "app": app_name}
+            return {"status": "ok", "job_id": job.id, "run_at": run_at.isoformat(), "app": app_name, "target": target}
 
-        timer = threading.Timer(minutes * 60, self._open_app, kwargs={"app_path": app_path})
+        timer = threading.Timer(minutes * 60, self._open_app, kwargs={"app_path": target})
         timer.daemon = True
         timer.start()
         self._timers[job_id] = timer
         self._jobs_meta[job_id] = {"next_run_time": run_at.isoformat(), "name": f"open_app:{app_name}"}
         self._last_job_id = job_id
-        return {"status": "ok", "job_id": job_id, "run_at": run_at.isoformat(), "app": app_name}
+        return {"status": "ok", "job_id": job_id, "run_at": run_at.isoformat(), "app": app_name, "target": target}
 
-    def open_app(self, app_path: str) -> dict:
-        self._open_app(app_path)
-        return {"status": "ok", "app_path": app_path}
+    def open_app(self, app_path: str, url: str | None = None) -> dict:
+        target = self._resolve_open_target(app_path, url)
+        self._open_app(target)
+        return {"status": "ok", "app_path": app_path, "target": target}
 
     def schedule_callable(
         self,
@@ -189,9 +192,22 @@ class SchedulerTools:
         return {"status": "ok", "job_id": job_id}
 
     def _open_app(self, app_path: str) -> None:
-        if not os.path.exists(app_path):
+        if not self._is_http_url(app_path) and not os.path.exists(app_path):
             raise FileNotFoundError(app_path)
         os.startfile(app_path)  # type: ignore[attr-defined]
+
+    def _resolve_open_target(self, app_path: str, url: str | None = None) -> str:
+        clean_url = (url or "").strip()
+        if clean_url:
+            if not self._is_http_url(clean_url):
+                raise ValueError("Only http/https URLs can be opened.")
+            return clean_url
+        return app_path
+
+    @staticmethod
+    def _is_http_url(value: str) -> bool:
+        parsed = urlparse(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     def _shutdown_now(self) -> None:
         subprocess.run(["shutdown", "/s", "/t", "0"], capture_output=True, text=True, check=False)

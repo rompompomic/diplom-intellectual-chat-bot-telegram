@@ -107,24 +107,86 @@ def get_tool_schemas() -> list[dict]:
         _tool("rebuild_index", "Rebuild local file index.", {}),
         _tool(
             "schedule_shutdown",
-            "Schedule Windows shutdown in N minutes. Requires confirmation.",
-            {"minutes": {"type": "integer", "minimum": 1, "maximum": 1440}},
+            (
+                "Schedule Windows shutdown. Convert natural-language time to integer minutes yourself "
+                "before calling this tool, e.g. 'a couple of hours' -> 120, 'half an hour' -> 30. "
+                "Requires app-level confirmation after the tool call."
+            ),
+            {
+                "minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1440,
+                    "description": "Delay before shutdown, in minutes. Infer this from natural-language time phrases.",
+                }
+            },
             required=["minutes"],
         ),
         _tool("cancel_shutdown", "Cancel shutdown schedule.", {}),
         _tool(
             "schedule_open_app",
-            "Schedule app launch in N minutes.",
+            "Schedule app launch in N minutes. If opening a browser URL, pass app as a browser alias and url as http/https URL.",
             {
                 "app": {"type": "string"},
                 "minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+                "url": {"type": "string", "description": "Optional http/https URL to open in the browser."},
             },
             required=["app", "minutes"],
         ),
-        _tool("open_app", "Open whitelisted app immediately.", {"app": {"type": "string"}}, required=["app"]),
+        _tool(
+            "open_app",
+            "Open whitelisted app immediately. If opening a browser URL, pass app as a browser alias and url as http/https URL.",
+            {
+                "app": {"type": "string"},
+                "url": {"type": "string", "description": "Optional http/https URL to open in the browser."},
+            },
+            required=["app"],
+        ),
         _tool("enable_startup", "Enable app autostart in Windows. Requires confirmation.", {}),
         _tool("disable_startup", "Disable app autostart in Windows. Requires confirmation.", {}),
         _tool("get_system_info", "Get system information via safe shell template.", {}),
+        _tool(
+            "run_safe_command",
+            (
+                "Run a read-only whitelisted diagnostic command. Use this for Docker/container checks, "
+                "listening ports, processes, network status, disk usage, and system diagnostics. "
+                "Never use it for destructive actions."
+            ),
+            {
+                "command": {
+                    "type": "string",
+                    "enum": [
+                        "docker_ps",
+                        "docker_logs",
+                        "docker_inspect",
+                        "docker_stats",
+                        "docker_top",
+                        "list_processes",
+                        "list_ports",
+                        "net_status",
+                        "disk_usage",
+                        "get_system_info",
+                    ],
+                },
+                "args": {
+                    "type": "object",
+                    "properties": {
+                        "container": {
+                            "type": "string",
+                            "description": "Docker container name or ID for docker_logs, docker_inspect, docker_top.",
+                        },
+                        "tail": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 500,
+                            "description": "Number of Docker log lines to read.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            required=["command"],
+        ),
         _tool("get_local_ip", "Get local IP address.", {}),
         _tool("get_public_ip", "Get external IP address.", {}),
         _tool("check_internet", "Check internet connectivity.", {}),

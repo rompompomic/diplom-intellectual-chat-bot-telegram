@@ -23,6 +23,10 @@ security:
 tools:
   allowed_apps:
     notepad: "C:\\Windows\\System32\\notepad.exe"
+    default browser: "https://www.google.com"
+    browser: "https://www.google.com"
+    браузер: "https://www.google.com"
+    браузер по умолчанию: "https://www.google.com"
   allowed_network_hosts:
     - "google.com"
     - "ya.ru"
